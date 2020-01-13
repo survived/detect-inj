@@ -5,21 +5,17 @@ use pnet::datalink::{DataLinkReceiver, DataLinkSender, NetworkInterface, channel
 use pnet::datalink::Channel::Ethernet;
 use pnet::packet::{self, Packet as _};
 
+use crate::types::PacketManifest;
+
 pub struct TcpIterator {
     send: Box<dyn DataLinkSender + 'static>,
     recv: Box<dyn DataLinkReceiver + 'static>,
 }
 
 pub enum Packet<'p> {
-    Tcp(TcpPacketLayers<'p>),
+    Tcp(PacketManifest<'p>),
     /// Represents a packet that wasn't recognized as TCP.
     FilteredOut(&'p [u8]),
-}
-
-pub struct TcpPacketLayers<'p> {
-    pub ethernet: packet::ethernet::EthernetPacket<'p>,
-    pub ip: packet::ipv4::Ipv4Packet<'p>,
-    pub tcp: packet::tcp::TcpPacket<'p>,
 }
 
 impl TryFrom<&NetworkInterface> for TcpIterator {
@@ -35,7 +31,7 @@ impl TryFrom<&NetworkInterface> for TcpIterator {
 }
 
 impl TcpIterator {
-    fn parse_tcp_packet<'p>(ethernet_frame: &'p [u8]) -> Option<TcpPacketLayers<'p>> {
+    fn parse_tcp_packet(ethernet_frame: &[u8]) -> Option<PacketManifest> {
         // This will return None if the provided buffer is less
         // then the minimum required packet size
         let ethernet_packet = packet::ethernet::EthernetPacket::new(ethernet_frame)?;
@@ -52,7 +48,7 @@ impl TcpIterator {
 
         let ipv4_payload = &ethernet_payload[ethernet_payload.len() - ipv4_packet.payload().len() ..];
         let tcp_packet = packet::tcp::TcpPacket::new(ipv4_payload)?;
-        Some(TcpPacketLayers {
+        Some(PacketManifest {
             tcp: tcp_packet,
             ip: ipv4_packet,
             ethernet: ethernet_packet,

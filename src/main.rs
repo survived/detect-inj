@@ -6,6 +6,8 @@ use pnet::packet::tcp::TcpFlags;
 use tcp_iterator::{TcpIterator, Packet};
 
 mod tcp_iterator;
+mod connection_state;
+mod types;
 
 fn main() -> io::Result<()> {
     let interface_name = env::args().nth(1).expect("interface not given");
