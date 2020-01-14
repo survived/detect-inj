@@ -12,7 +12,7 @@ pub struct Connection {
     skip_hijack_detection_count: u64,
     state: TcpState,
     client_next_seq: Sequence,
-    server_next_seq: Sequence,
+    server_next_seq: Option<Sequence>,
     hijack_next_ack: Sequence,
     first_syn_ack_seq: u32
 }
@@ -112,7 +112,7 @@ impl Connection {
             return
         }
         self.state = TcpState::ConnectionEstablished;
-        self.server_next_seq = Sequence::from(packet.tcp.get_sequence()) + (packet.tcp.payload().len() as u32 + 1);
+        self.server_next_seq = Some(Sequence::from(packet.tcp.get_sequence()) + (packet.tcp.payload().len() as u32 + 1));
         self.first_syn_ack_seq = packet.tcp.get_sequence();
     }
 
@@ -136,7 +136,7 @@ impl Connection {
             // handshake anomaly
             return
         }
-        if Sequence::from(packet.tcp.get_acknowledgement()) != self.server_next_seq {
+        if Some(Sequence::from(packet.tcp.get_acknowledgement())) != self.server_next_seq {
             // handshake anomaly
             return
         }
