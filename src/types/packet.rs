@@ -7,16 +7,37 @@ pub struct PacketManifest<'p> {
     pub tcp: packet::tcp::TcpPacket<'p>,
 }
 
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub struct Flow {
+    src: (IpAddr, u16),
+    dst: (IpAddr, u16),
+}
+
+impl<'p> From<&PacketManifest<'p>> for Flow {
+    fn from(packet: &PacketManifest<'p>) -> Self {
+        let src = (IpAddr::V4(packet.ip.get_source()), packet.tcp.get_source());
+        let dst = (IpAddr::V4(packet.ip.get_destination()), packet.tcp.get_destination());
+        Self{ src, dst }
+    }
+}
+
+impl Flow {
+    pub fn reverse(mut self) -> Self {
+        std::mem::swap(&mut self.src, &mut self.dst);
+        self
+    }
+}
+
 /// Used to identify packet sender side within Connection
 #[derive(Eq, PartialEq, Copy, Clone)]
 pub struct SideIdentifier {
-    client: (IpAddr, u16),
-    server: (IpAddr, u16),
+    client_flow: Flow,
+    server_flow: Flow,
 }
 
 impl SideIdentifier {
-    pub fn new(client: (IpAddr, u16), server: (IpAddr, u16)) -> Self {
-        Self{ client, server }
+    pub fn from_client_flow(client_flow: Flow) -> Self {
+        Self{ client_flow, server_flow: client_flow.reverse() }
     }
 
     /// Determines which side has sent this packet.
@@ -24,13 +45,9 @@ impl SideIdentifier {
     /// # Panic
     /// Panics if packet is sent by neither client nor server.
     pub fn identify(&self, packet: &PacketManifest) -> Side {
-        if IpAddr::V4(packet.ip.get_source()) == self.client.0 && IpAddr::V4(packet.ip.get_destination()) == self.server.0
-            && packet.tcp.get_source() == self.client.1 && packet.tcp.get_destination() == self.server.1
-        {
+        if self.client_flow == Flow::from(packet) {
             Side::Client
-        } else if IpAddr::V4(packet.ip.get_source()) == self.server.0 && IpAddr::V4(packet.ip.get_destination()) == self.client.0
-            && packet.tcp.get_source() == self.server.1 && packet.tcp.get_destination() == self.client.1
-        {
+        } else if self.server_flow == Flow::from(packet) {
             Side::Server
         } else {
             panic!("Unknown packet sender")

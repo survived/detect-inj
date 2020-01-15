@@ -1,12 +1,15 @@
+use std::net::IpAddr;
+
+use time::PrimitiveDateTime;
 use pnet::packet::Packet;
 use pnet::packet::tcp::TcpFlags;
 
-use crate::types::{Sequence, PacketManifest, SideIdentifier, Side};
+use crate::types::{Sequence, PacketManifest, SideIdentifier, Side, Flow};
 use crate::utils::BitMask;
-use std::net::IpAddr;
+use crate::event::{AttackReporter, AttackReport};
 
 pub struct Connection {
-    attack_detected: bool,
+    attack_reporter: Box<dyn AttackReporter>,
     side_id: SideIdentifier,
     packet_count: u64,
     skip_hijack_detection_count: u64,
@@ -79,8 +82,7 @@ impl Connection {
     }
 
     fn state_unknown(&mut self, packet: PacketManifest) {
-        self.side_id = SideIdentifier::new((IpAddr::V4(packet.ip.get_source()), packet.tcp.get_source()),
-                                           (IpAddr::V4(packet.ip.get_destination()), packet.tcp.get_destination()));
+        self.side_id = SideIdentifier::from_client_flow(Flow::from(&packet));
 
         if packet.tcp.get_flags().bits(TcpFlags::SYN) && !packet.tcp.get_flags().bits(TcpFlags::ACK) {
             self.state = TcpState::ConnectionRequest;
@@ -117,11 +119,9 @@ impl Connection {
     }
 
     fn state_connection_established(&mut self, packet: PacketManifest) {
-        if !self.attack_detected {
-            let hijack_detected = self.detect_hijack(&packet);
-            if hijack_detected {
-                self.attack_detected = true;
-                return
+        if !self.attack_reporter.is_attack_detected() {
+            if let Some(report) = self.detect_hijack(&packet) {
+                self.attack_reporter.report_attack(report);
             }
         }
         if self.side_id.identify(&packet) != Side::Client {
@@ -146,30 +146,38 @@ impl Connection {
 
     fn state_data_transfer(&mut self, packet: PacketManifest) {
         if self.server_next_seq.is_none() && self.side_id.identify(&packet) == Side::Server {
-            self.server_next_seq = Some(packet.tcp.get_sequence());
+            self.server_next_seq = Some(Sequence::from(packet.tcp.get_sequence()));
         }
 
         if self.packet_count < self.skip_hijack_detection_count {
-            self.attack_detected = self.detect_hijack(&packet);
+            if let Some(report) = self.detect_hijack(&packet) {
+                self.attack_reporter.report_attack(report);
+            }
         }
     }
 
     fn state_connection_closing(&mut self, packet: PacketManifest, state: TcpClosing) {}
     fn state_closed(&mut self, packet: PacketManifest) {}
 
-    fn detect_hijack(&self, packet: &PacketManifest) -> bool {
+    fn detect_hijack(&self, packet: &PacketManifest) -> Option<AttackReport> {
         if self.side_id.identify(packet) != Side::Server {
-            return false
+            return None
         }
         if !packet.tcp.get_flags().bits(TcpFlags::ACK | TcpFlags::SYN) {
-            return false
+            return None
         }
         if Sequence::from(packet.tcp.get_sequence()) - self.hijack_next_ack != 0 {
-            return false
+            return None
         }
         if packet.tcp.get_sequence() == self.first_syn_ack_seq {
-            return false
+            return None
         }
-        true // hijack detected
+        Some(AttackReport::HandshakeHijack {
+            time: PrimitiveDateTime::now(),
+            packet_count: self.packet_count,
+            flow: Flow::from(packet),
+            hijack_seq: packet.tcp.get_sequence(),
+            hijack_ack: packet.tcp.get_acknowledgement(),
+        })
     }
 }

@@ -9,6 +9,7 @@ mod tcp_iterator;
 mod connection_state;
 mod types;
 mod utils;
+mod event;
 
 fn main() -> io::Result<()> {
     let interface_name = env::args().nth(1).expect("interface not given");
