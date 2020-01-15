@@ -144,7 +144,16 @@ impl Connection {
         self.state = TcpState::DataTransfer;
     }
 
-    fn state_data_transfer(&mut self, packet: PacketManifest) {}
+    fn state_data_transfer(&mut self, packet: PacketManifest) {
+        if self.server_next_seq.is_none() && self.side_id.identify(&packet) == Side::Server {
+            self.server_next_seq = Some(packet.tcp.get_sequence());
+        }
+
+        if self.packet_count < self.skip_hijack_detection_count {
+            self.attack_detected = self.detect_hijack(&packet);
+        }
+    }
+
     fn state_connection_closing(&mut self, packet: PacketManifest, state: TcpClosing) {}
     fn state_closed(&mut self, packet: PacketManifest) {}
 
