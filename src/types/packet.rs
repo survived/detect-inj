@@ -7,7 +7,7 @@ pub struct PacketManifest<'p> {
     pub tcp: packet::tcp::TcpPacket<'p>,
 }
 
-#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct Flow {
     src: (IpAddr, u16),
     dst: (IpAddr, u16),
@@ -55,7 +55,7 @@ impl SideIdentifier {
     }
 }
 
-#[derive(Eq, PartialEq, Copy, Clone)]
+#[derive(Eq, PartialEq, Copy, Clone, Debug)]
 pub enum Side {
     Client,
     Server,

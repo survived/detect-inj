@@ -8,21 +8,25 @@ use crate::types::{Sequence, PacketManifest, SideIdentifier, Side, Flow};
 use crate::utils::BitMask;
 use crate::event::{AttackReporter, AttackReport};
 
+pub struct ConnectionOptions {
+    pub attack_reporter: Box<dyn AttackReporter>,
+    pub skip_hijack_detection_count: u64
+}
+
 pub struct Connection {
     attack_reporter: Box<dyn AttackReporter>,
     side_id: SideIdentifier,
     packet_count: u64,
     skip_hijack_detection_count: u64,
+    hijack_next_ack: Sequence,
     state: TcpState,
     client_next_seq: Sequence,
     server_next_seq: Option<Sequence>,
-    hijack_next_ack: Sequence,
-    first_syn_ack_seq: u32
+    first_syn_ack_seq: Option<u32>,
 }
 
 #[derive(Eq, PartialEq, Copy, Clone, Debug)]
 pub enum TcpState {
-    Unknown,
     ConnectionRequest,
     ConnectionEstablished,
     DataTransfer,
@@ -33,15 +37,9 @@ pub enum TcpState {
 
 #[derive(Eq, PartialEq, Copy, Clone, Debug)]
 pub struct TcpClosing {
-    initiator: ClosingInitiator,
+    initiator: Side,
     initiator_state: TcpInitiatingClosingState,
     effector_state: TcpInitiatedClosingState,
-}
-
-#[derive(Eq, PartialEq, Copy, Clone, Debug)]
-pub enum ClosingInitiator {
-    ThisSide,
-    RemoteSide,
 }
 
 #[derive(Eq, PartialEq, Copy, Clone, Debug)]
@@ -59,12 +57,30 @@ pub enum TcpInitiatedClosingState {
 }
 
 impl Connection {
+    pub fn from_packet(packet: PacketManifest, options: ConnectionOptions) -> Self {
+        let is_initial_packet = packet.tcp.get_flags().bits(TcpFlags::SYN) && !packet.tcp.get_flags().bits(TcpFlags::ACK);
+        let is_closing_packet = !is_initial_packet && (packet.tcp.get_flags().bits(TcpFlags::FIN) || packet.tcp.get_flags().bits(TcpFlags::RST));
+        let client_next_seq = Sequence::from(packet.tcp.get_sequence()) + packet.tcp.payload().len() as u32;
+
+        Self {
+            attack_reporter: options.attack_reporter,
+            state: if is_initial_packet { TcpState::ConnectionRequest }
+                   else if is_closing_packet { TcpState::Closed }
+                   else { TcpState::DataTransfer },
+            client_next_seq,
+            server_next_seq: None,
+            skip_hijack_detection_count: if is_initial_packet { options.skip_hijack_detection_count } else { 0 },
+            hijack_next_ack: if is_initial_packet { client_next_seq } else { Sequence::from(0) },
+            packet_count: 1,
+            first_syn_ack_seq: None,
+            side_id: SideIdentifier::from_client_flow(Flow::from(&packet)),
+        }
+    }
+
     pub fn receive_packet(&mut self, packet: PacketManifest) {
         self.packet_count += 1;
 
         match self.state {
-            TcpState::Unknown
-                => self.state_unknown(packet),
             TcpState::ConnectionRequest
                 => self.state_connection_request(packet),
             TcpState::ConnectionEstablished
@@ -77,25 +93,6 @@ impl Connection {
                 => self.state_closed(packet),
             TcpState::Invalid => {
                 // TODO: what do we do here?
-            }
-        }
-    }
-
-    fn state_unknown(&mut self, packet: PacketManifest) {
-        self.side_id = SideIdentifier::from_client_flow(Flow::from(&packet));
-
-        if packet.tcp.get_flags().bits(TcpFlags::SYN) && !packet.tcp.get_flags().bits(TcpFlags::ACK) {
-            self.state = TcpState::ConnectionRequest;
-
-            self.client_next_seq = Sequence::from(packet.tcp.get_sequence()) + packet.tcp.payload().len() as u32;
-            self.hijack_next_ack = self.client_next_seq;
-        } else {
-            self.state = TcpState::DataTransfer;
-            self.skip_hijack_detection_count = 0;
-            self.client_next_seq = Sequence::from(packet.tcp.get_sequence()) + packet.tcp.payload().len() as u32;
-
-            if packet.tcp.get_flags().bits(TcpFlags::FIN) || packet.tcp.get_flags().bits(TcpFlags::RST) {
-                self.state = TcpState::Closed;
             }
         }
     }
@@ -115,7 +112,7 @@ impl Connection {
         }
         self.state = TcpState::ConnectionEstablished;
         self.server_next_seq = Some(Sequence::from(packet.tcp.get_sequence()) + (packet.tcp.payload().len() as u32 + 1));
-        self.first_syn_ack_seq = packet.tcp.get_sequence();
+        self.first_syn_ack_seq = Some(packet.tcp.get_sequence());
     }
 
     fn state_connection_established(&mut self, packet: PacketManifest) {
@@ -169,7 +166,7 @@ impl Connection {
         if Sequence::from(packet.tcp.get_sequence()) - self.hijack_next_ack != 0 {
             return None
         }
-        if packet.tcp.get_sequence() == self.first_syn_ack_seq {
+        if Some(packet.tcp.get_sequence()) == self.first_syn_ack_seq {
             return None
         }
         Some(AttackReport::HandshakeHijack {
