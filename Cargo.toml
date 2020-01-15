@@ -7,3 +7,4 @@ edition = "2018"
 [dependencies]
 pnet = "0.25.0"
 time = "0.2.2"
+pdu = "1.0.0-beta3"

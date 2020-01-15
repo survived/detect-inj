@@ -58,9 +58,9 @@ pub enum TcpInitiatedClosingState {
 
 impl Connection {
     pub fn from_packet(packet: PacketManifest, options: ConnectionOptions) -> Self {
-        let is_initial_packet = packet.tcp.get_flags().bits(TcpFlags::SYN) && !packet.tcp.get_flags().bits(TcpFlags::ACK);
-        let is_closing_packet = !is_initial_packet && (packet.tcp.get_flags().bits(TcpFlags::FIN) || packet.tcp.get_flags().bits(TcpFlags::RST));
-        let client_next_seq = Sequence::from(packet.tcp.get_sequence()) + packet.tcp.payload().len() as u32;
+        let is_initial_packet = packet.tcp.flags.syn && !packet.tcp.flags.ack;
+        let is_closing_packet = !is_initial_packet && (packet.tcp.flags.fin || packet.tcp.flags.rst);
+        let client_next_seq = Sequence::from(packet.tcp.seq) + packet.tcp_payload.len() as u32;
 
         Self {
             attack_reporter: options.attack_reporter,
@@ -102,17 +102,17 @@ impl Connection {
             // handshake anomaly
             return
         }
-        if !(packet.tcp.get_flags().bits(TcpFlags::SYN) && packet.tcp.get_flags().bits(TcpFlags::ACK)) {
+        if !(packet.tcp.flags.syn && packet.tcp.flags.ack) {
             // handshake anomaly
             return
         }
-        if self.client_next_seq - Sequence::from(packet.tcp.get_acknowledgement()) != 0 {
+        if self.client_next_seq - Sequence::from(packet.tcp.ack) != 0 {
             // handshake anomaly
             return
         }
         self.state = TcpState::ConnectionEstablished;
-        self.server_next_seq = Some(Sequence::from(packet.tcp.get_sequence()) + (packet.tcp.payload().len() as u32 + 1));
-        self.first_syn_ack_seq = Some(packet.tcp.get_sequence());
+        self.server_next_seq = Some(Sequence::from(packet.tcp.seq) + (packet.tcp_payload.len() as u32 + 1));
+        self.first_syn_ack_seq = Some(packet.tcp.seq);
     }
 
     fn state_connection_established(&mut self, packet: PacketManifest) {
@@ -125,15 +125,15 @@ impl Connection {
             // handshake anomaly
             return
         }
-        if packet.tcp.get_flags().bits(TcpFlags::SYN) || !packet.tcp.get_flags().bits(TcpFlags::ACK) {
+        if packet.tcp.flags.syn || !packet.tcp.flags.ack {
             // handshake anomaly
             return
         }
-        if Sequence::from(packet.tcp.get_sequence()) != self.client_next_seq {
+        if Sequence::from(packet.tcp.seq) != self.client_next_seq {
             // handshake anomaly
             return
         }
-        if Some(Sequence::from(packet.tcp.get_acknowledgement())) != self.server_next_seq {
+        if Some(Sequence::from(packet.tcp.ack)) != self.server_next_seq {
             // handshake anomaly
             return
         }
@@ -143,7 +143,7 @@ impl Connection {
 
     fn state_data_transfer(&mut self, packet: PacketManifest) {
         if self.server_next_seq.is_none() && self.side_id.identify(&packet) == Side::Server {
-            self.server_next_seq = Some(Sequence::from(packet.tcp.get_sequence()));
+            self.server_next_seq = Some(Sequence::from(packet.tcp.seq));
         }
 
         if self.packet_count < self.skip_hijack_detection_count {
@@ -160,21 +160,21 @@ impl Connection {
         if self.side_id.identify(packet) != Side::Server {
             return None
         }
-        if !packet.tcp.get_flags().bits(TcpFlags::ACK | TcpFlags::SYN) {
+        if !packet.tcp.flags.ack || !packet.tcp.flags.syn {
             return None
         }
-        if Sequence::from(packet.tcp.get_sequence()) - self.hijack_next_ack != 0 {
+        if Sequence::from(packet.tcp.seq) - self.hijack_next_ack != 0 {
             return None
         }
-        if Some(packet.tcp.get_sequence()) == self.first_syn_ack_seq {
+        if Some(packet.tcp.seq) == self.first_syn_ack_seq {
             return None
         }
         Some(AttackReport::HandshakeHijack {
             time: PrimitiveDateTime::now(),
             packet_count: self.packet_count,
             flow: Flow::from(packet),
-            hijack_seq: packet.tcp.get_sequence(),
-            hijack_ack: packet.tcp.get_acknowledgement(),
+            hijack_seq: packet.tcp.seq,
+            hijack_ack: packet.tcp.ack,
         })
     }
 }

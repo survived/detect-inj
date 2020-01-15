@@ -22,6 +22,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 name = "detect-inj"
 version = "0.1.0"
 dependencies = [
+ "pdu 1.0.0-beta3 (registry+https://github.com/rust-lang/crates.io-index)",
  "pnet 0.25.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "time 0.2.2 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
@@ -77,6 +78,11 @@ dependencies = [
 [[package]]
 name = "memchr"
 version = "2.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+
+[[package]]
+name = "pdu"
+version = "1.0.0-beta3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 
 [[package]]
@@ -295,6 +301,7 @@ dependencies = [
 "checksum log 0.3.9 (registry+https://github.com/rust-lang/crates.io-index)" = "e19e8d5c34a3e0e2223db8e060f9e8264aeeb5c5fc64a4ee9965c062211c024b"
 "checksum log 0.4.8 (registry+https://github.com/rust-lang/crates.io-index)" = "14b6052be84e6b71ab17edffc2eeabf5c2c3ae1fdb464aae35ac50c67a44e1f7"
 "checksum memchr 2.3.0 (registry+https://github.com/rust-lang/crates.io-index)" = "3197e20c7edb283f87c071ddfc7a2cca8f8e0b888c242959846a6fce03c72223"
+"checksum pdu 1.0.0-beta3 (registry+https://github.com/rust-lang/crates.io-index)" = "1988cd00fdf321c5784c62ec5c0cfe7c3d734d7002fd355fce1457de5035ce7f"
 "checksum pnet 0.25.0 (registry+https://github.com/rust-lang/crates.io-index)" = "5c08c2c6c26481fcbe49dc4405baedf47151f859c5a45d3f254c2ff74ce51cf0"
 "checksum pnet_base 0.22.0 (registry+https://github.com/rust-lang/crates.io-index)" = "4df28acf2fcc77436dd2b91a9a0c2bb617f9ca5f2acefee1a4135058b9f9801f"
 "checksum pnet_datalink 0.25.0 (registry+https://github.com/rust-lang/crates.io-index)" = "545f8df67cbc53438f37f56e68ae5ca49beb3990e9fd7e9e214c8ffd36c0e0ea"

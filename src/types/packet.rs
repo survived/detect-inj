@@ -1,10 +1,31 @@
 use std::net::IpAddr;
 use pnet::packet;
 
+/// Represents information about TCP packet that matters for injections detection.
 pub struct PacketManifest<'p> {
-    pub ethernet: packet::ethernet::EthernetPacket<'p>,
-    pub ip: packet::ipv4::Ipv4Packet<'p>,
-    pub tcp: packet::tcp::TcpPacket<'p>,
+    pub ip: IpLayer,
+    pub tcp: TcpLayer,
+    pub tcp_payload: &'p [u8],
+}
+
+pub struct IpLayer {
+    pub src: IpAddr,
+    pub dst: IpAddr,
+}
+
+pub struct TcpLayer {
+    pub src: u16,
+    pub dst: u16,
+    pub ack: u32,
+    pub seq: u32,
+    pub flags: TcpFlags,
+}
+
+pub struct TcpFlags {
+    pub syn: bool,
+    pub ack: bool,
+    pub fin: bool,
+    pub rst: bool,
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
@@ -15,8 +36,8 @@ pub struct Flow {
 
 impl<'p> From<&PacketManifest<'p>> for Flow {
     fn from(packet: &PacketManifest<'p>) -> Self {
-        let src = (IpAddr::V4(packet.ip.get_source()), packet.tcp.get_source());
-        let dst = (IpAddr::V4(packet.ip.get_destination()), packet.tcp.get_destination());
+        let src = (packet.ip.src, packet.tcp.src);
+        let dst = (packet.ip.dst, packet.tcp.dst);
         Self{ src, dst }
     }
 }

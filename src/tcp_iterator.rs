@@ -1,11 +1,12 @@
 use std::convert::TryFrom;
+use std::net::IpAddr;
 use std::io;
 
 use pnet::datalink::{DataLinkReceiver, DataLinkSender, NetworkInterface, channel};
 use pnet::datalink::Channel::Ethernet;
-use pnet::packet::{self, Packet as _};
+use pdu;
 
-use crate::types::PacketManifest;
+use crate::types::{PacketManifest, IpLayer, TcpLayer, TcpFlags};
 
 pub struct TcpIterator {
     send: Box<dyn DataLinkSender + 'static>,
@@ -31,33 +32,9 @@ impl TryFrom<&NetworkInterface> for TcpIterator {
 }
 
 impl TcpIterator {
-    fn parse_tcp_packet(ethernet_frame: &[u8]) -> Option<PacketManifest> {
-        // This will return None if the provided buffer is less
-        // then the minimum required packet size
-        let ethernet_packet = packet::ethernet::EthernetPacket::new(ethernet_frame)?;
-        // TODO: support Ipv6
-        if ethernet_packet.get_ethertype() != packet::ethernet::EtherTypes::Ipv4 {
-            return None
-        }
-
-        let ethernet_payload = &ethernet_frame[ethernet_frame.len() - ethernet_packet.payload().len()..];
-        let ipv4_packet = packet::ipv4::Ipv4Packet::new(ethernet_payload)?;
-        if ipv4_packet.get_next_level_protocol() != packet::ip::IpNextHeaderProtocols::Tcp {
-            return None
-        }
-
-        let ipv4_payload = &ethernet_payload[ethernet_payload.len() - ipv4_packet.payload().len() ..];
-        let tcp_packet = packet::tcp::TcpPacket::new(ipv4_payload)?;
-        Some(PacketManifest {
-            tcp: tcp_packet,
-            ip: ipv4_packet,
-            ethernet: ethernet_packet,
-        })
-    }
-
     pub fn next(&mut self) -> io::Result<Packet> {
         let ethernet_frame = self.recv.next()?;
-        let parsed = Self::parse_tcp_packet(ethernet_frame);
+        let parsed = Self::parse_ethernet(ethernet_frame);
 
         let result = self.send.build_and_send(1, ethernet_frame.len(),
                                               &mut |new_packet| {
@@ -73,5 +50,54 @@ impl TcpIterator {
             Some(layers) => Ok(Packet::Tcp(layers)),
             None => Ok(Packet::FilteredOut(ethernet_frame))
         }
+    }
+    
+    fn parse_ethernet(ethernet_frame: &[u8]) -> Option<PacketManifest> {
+        let ethernet_pdu = pdu::EthernetPdu::new(ethernet_frame).ok()?;
+        let inner = &ethernet_frame[ethernet_pdu.computed_ihl()..];
+        Self::parse_ip(ethernet_pdu.ethertype(), inner)
+    }
+    fn parse_ip(ty: u16, buffer: &[u8]) -> Option<PacketManifest> {
+        match ty {
+            pdu::EtherType::IPV4 => {
+                let ipv4_pdu = pdu::Ipv4Pdu::new(buffer).ok()?;
+                let ip_layer = IpLayer {
+                    src: IpAddr::V4(ipv4_pdu.source_address().into()),
+                    dst: IpAddr::V4(ipv4_pdu.destination_address().into()),
+                };
+                let tcp_buffer = &buffer[ipv4_pdu.computed_ihl()..];
+                Self::parse_tcp(ip_layer, tcp_buffer)
+            }
+            pdu::EtherType::IPV6 => {
+                let ipv6_pdu = pdu::Ipv6Pdu::new(buffer).ok()?;
+                let ip_layer = IpLayer {
+                    src: IpAddr::V6(ipv6_pdu.source_address().into()),
+                    dst: IpAddr::V6(ipv6_pdu.destination_address().into()),
+                };
+                let tcp_buffer = &buffer[ipv6_pdu.computed_ihl()..];
+                Self::parse_tcp(ip_layer, tcp_buffer)
+            }
+            _ => return None
+        }
+    }
+    fn parse_tcp(ip: IpLayer, buffer: &[u8]) -> Option<PacketManifest> {
+        let tcp_pdu = pdu::TcpPdu::new(buffer).ok()?;
+        let tcp_payload = &buffer[tcp_pdu.computed_data_offset()..];
+        Some(PacketManifest {
+            ip,
+            tcp: TcpLayer {
+                src: tcp_pdu.source_port(),
+                dst: tcp_pdu.destination_port(),
+                ack: tcp_pdu.acknowledgement_number(),
+                seq: tcp_pdu.sequence_number(),
+                flags: TcpFlags {
+                    syn: tcp_pdu.syn(),
+                    ack: tcp_pdu.ack(),
+                    fin: tcp_pdu.fin(),
+                    rst: tcp_pdu.rst(),
+                },
+            },
+            tcp_payload,
+        })
     }
 }
