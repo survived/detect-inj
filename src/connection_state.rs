@@ -60,7 +60,7 @@ impl Connection {
     pub fn from_packet(packet: PacketManifest, options: ConnectionOptions) -> Self {
         let is_initial_packet = packet.tcp.flags.syn && !packet.tcp.flags.ack;
         let is_closing_packet = !is_initial_packet && (packet.tcp.flags.fin || packet.tcp.flags.rst);
-        let client_next_seq = Sequence::from(packet.tcp.seq) + packet.tcp_payload.len() as u32;
+        let client_next_seq = Sequence::from(packet.tcp.seq) + 1 + packet.tcp_payload.len() as u32;
 
         Self {
             attack_reporter: options.attack_reporter,
@@ -98,7 +98,7 @@ impl Connection {
     }
 
     fn state_connection_request(&mut self, packet: PacketManifest) {
-        if self.side_id.identify(&packet) == Side::Server {
+        if self.side_id.identify(&packet) != Side::Server {
             // handshake anomaly
             return
         }
@@ -163,7 +163,7 @@ impl Connection {
         if !packet.tcp.flags.ack || !packet.tcp.flags.syn {
             return None
         }
-        if Sequence::from(packet.tcp.seq) - self.hijack_next_ack != 0 {
+        if Sequence::from(packet.tcp.ack) != self.hijack_next_ack {
             return None
         }
         if Some(packet.tcp.seq) == self.first_syn_ack_seq {
@@ -176,5 +176,129 @@ impl Connection {
             hijack_seq: packet.tcp.seq,
             hijack_ack: packet.tcp.ack,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::event::test_utils::DummyAttackReporter;
+    use crate::types::{IpLayer, TcpLayer, TcpFlags};
+
+    use std::rc::Rc;
+    use std::cell::RefCell;
+    use std::net::Ipv4Addr;
+
+    #[test]
+    fn detect_tcp_hijack() {
+        let shared_reports: Rc<RefCell<Vec<_>>> = Default::default();
+        let connection_options = ConnectionOptions {
+            skip_hijack_detection_count: 12,
+            attack_reporter: Box::new(DummyAttackReporter::new(shared_reports.clone())),
+        };
+
+        let client_ip = IpLayer {
+            src: Ipv4Addr::new(1, 2, 3, 4).into(),
+            dst: Ipv4Addr::new(2, 3, 4, 5).into(),
+        };
+        let server_ip = IpLayer {
+            src: Ipv4Addr::new(2, 3, 4, 5).into(),
+            dst: Ipv4Addr::new(1, 2, 3, 4).into(),
+        };
+
+        // initial packet
+
+        let packet = PacketManifest {
+            ip: client_ip,
+            tcp: TcpLayer {
+                src: 1,
+                dst: 2,
+                seq: 3,
+                flags: TcpFlags {
+                    syn: true,
+                    ack: false,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            tcp_payload: &[],
+        };
+        let mut connection = Connection::from_packet(packet, connection_options);
+        assert_eq!(connection.state, TcpState::ConnectionRequest, "invalid state transaction");
+
+        // next packet
+        connection.receive_packet(PacketManifest {
+            ip: server_ip,
+            tcp: TcpLayer {
+                src: 2,
+                dst: 1,
+                seq: 9,
+                ack: 4,
+                flags: TcpFlags {
+                    syn: true,
+                    ack: true,
+                    ..Default::default()
+                },
+            },
+            tcp_payload: &[],
+        });
+        assert_eq!(connection.state, TcpState::ConnectionEstablished, "invalid state transaction");
+
+        // test hijack
+        connection.receive_packet(PacketManifest {
+            ip: server_ip,
+            tcp: TcpLayer {
+                src: 2,
+                dst: 1,
+                seq: 6699,
+                ack: 4,
+                flags: TcpFlags {
+                    syn: true,
+                    ack: true,
+                    ..Default::default()
+                },
+            },
+          tcp_payload: &[],
+        });
+
+        let reports_count = shared_reports.borrow().len();
+        assert_eq!(reports_count, 1, "hijack detection fail");
+
+        // Going to data transfer state
+        connection.receive_packet(PacketManifest {
+            ip: client_ip,
+            tcp: TcpLayer {
+                src: 1,
+                dst: 2,
+                seq: 4,
+                ack: 10,
+                flags: TcpFlags {
+                    syn: false,
+                    ack: true,
+                    ..Default::default()
+                },
+            },
+            tcp_payload: &[],
+        });
+        assert_eq!(connection.state, TcpState::DataTransfer, "invalid state transition");
+
+        // test hijack in transfer state
+        connection.receive_packet(PacketManifest {
+            ip: server_ip,
+            tcp: TcpLayer {
+                src: 2,
+                dst: 1,
+                seq: 7711,
+                ack: 4,
+                flags: TcpFlags {
+                    syn: true,
+                    ack: true,
+                    ..Default::default()
+                },
+            },
+            tcp_payload: &[],
+        });
+        let reports_count = shared_reports.borrow().len();
+        assert_eq!(reports_count, 2, "hijack detection fail");
     }
 }

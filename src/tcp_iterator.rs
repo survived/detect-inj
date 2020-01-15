@@ -51,7 +51,7 @@ impl TcpIterator {
             None => Ok(Packet::FilteredOut(ethernet_frame))
         }
     }
-    
+
     fn parse_ethernet(ethernet_frame: &[u8]) -> Option<PacketManifest> {
         let ethernet_pdu = pdu::EthernetPdu::new(ethernet_frame).ok()?;
         let inner = &ethernet_frame[ethernet_pdu.computed_ihl()..];

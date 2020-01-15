@@ -1,6 +1,6 @@
 use std::ops;
 
-#[derive(Ord, PartialOrd, Eq, PartialEq, Copy, Clone)]
+#[derive(Ord, PartialOrd, Eq, PartialEq, Copy, Clone, Debug)]
 pub struct Sequence(u32);
 
 impl ops::Sub for Sequence {

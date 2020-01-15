@@ -2,17 +2,20 @@ use std::net::IpAddr;
 use pnet::packet;
 
 /// Represents information about TCP packet that matters for injections detection.
+#[derive(Debug)]
 pub struct PacketManifest<'p> {
     pub ip: IpLayer,
     pub tcp: TcpLayer,
     pub tcp_payload: &'p [u8],
 }
 
+#[derive(Copy, Clone, Debug)]
 pub struct IpLayer {
     pub src: IpAddr,
     pub dst: IpAddr,
 }
 
+#[derive(Copy, Clone, Debug, Default)]
 pub struct TcpLayer {
     pub src: u16,
     pub dst: u16,
@@ -21,6 +24,7 @@ pub struct TcpLayer {
     pub flags: TcpFlags,
 }
 
+#[derive(Copy, Clone, Debug, Default)]
 pub struct TcpFlags {
     pub syn: bool,
     pub ack: bool,
