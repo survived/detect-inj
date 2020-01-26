@@ -4,9 +4,10 @@ use time::PrimitiveDateTime;
 use pnet::packet::Packet;
 use pnet::packet::tcp::TcpFlags;
 
-use crate::types::{Sequence, PacketManifest, SideIdentifier, Side, Flow};
+use crate::types::{Sequence, PacketManifest, SideIdentifier, Side, Flow, Ring};
 use crate::utils::BitMask;
 use crate::event::{AttackReporter, AttackReport};
+use crate::connection_state::ClosedBy::ClosedByRst;
 
 pub struct ConnectionOptions {
     pub attack_reporter: Box<dyn AttackReporter>,
@@ -23,6 +24,8 @@ pub struct Connection {
     client_next_seq: Sequence,
     server_next_seq: Option<Sequence>,
     first_syn_ack_seq: Option<u32>,
+    client_stream_ring: Ring<PacketManifest<'static>>,
+    server_stream_ring: Ring<PacketManifest<'static>>,
 }
 
 #[derive(Eq, PartialEq, Copy, Clone, Debug)]
@@ -32,7 +35,7 @@ pub enum TcpState {
     DataTransfer,
     ConnectionClosing(TcpClosing),
     Invalid,
-    Closed,
+    Closed(ClosedBy, Side, Sequence),
 }
 
 #[derive(Eq, PartialEq, Copy, Clone, Debug)]
@@ -56,24 +59,39 @@ pub enum TcpInitiatedClosingState {
     LastAck,
 }
 
+#[derive(Eq, PartialEq, Copy, Clone, Debug)]
+pub enum ClosedBy {
+    ClosedByRst,
+    ClosedByFin,
+}
+
 impl Connection {
     pub fn from_packet(packet: PacketManifest, options: ConnectionOptions) -> Self {
         let is_initial_packet = packet.tcp.flags.syn && !packet.tcp.flags.ack;
         let is_closing_packet = !is_initial_packet && (packet.tcp.flags.fin || packet.tcp.flags.rst);
         let client_next_seq = Sequence::from(packet.tcp.seq) + 1 + packet.tcp_payload.len() as u32;
+        let side_id = SideIdentifier::from_client_flow(Flow::from(&packet));
 
         Self {
             attack_reporter: options.attack_reporter,
-            state: if is_initial_packet { TcpState::ConnectionRequest }
-                   else if is_closing_packet { TcpState::Closed }
-                   else { TcpState::DataTransfer },
+            state: if is_initial_packet {
+                       TcpState::ConnectionRequest
+                   } else if is_closing_packet {
+                       TcpState::Closed(if packet.tcp.flags.rst { ClosedBy::ClosedByRst } else { ClosedBy::ClosedByFin },
+                                        side_id.identify(&packet),
+                                        Sequence::from(packet.tcp.seq))
+                   } else {
+                       TcpState::DataTransfer
+                   },
             client_next_seq,
             server_next_seq: None,
             skip_hijack_detection_count: if is_initial_packet { options.skip_hijack_detection_count } else { 0 },
             hijack_next_ack: if is_initial_packet { client_next_seq } else { Sequence::from(0) },
             packet_count: 1,
             first_syn_ack_seq: None,
-            side_id: SideIdentifier::from_client_flow(Flow::from(&packet)),
+            side_id,
+            client_stream_ring: Ring::new(100),
+            server_stream_ring: Ring::new(100),
         }
     }
 
@@ -89,7 +107,7 @@ impl Connection {
                 => self.state_data_transfer(packet),
             TcpState::ConnectionClosing(sub_state)
                 => self.state_connection_closing(packet, sub_state),
-            TcpState::Closed
+            TcpState::Closed(_, _, _)
                 => self.state_closed(packet),
             TcpState::Invalid => {
                 // TODO: what do we do here?
@@ -151,6 +169,52 @@ impl Connection {
                 self.attack_reporter.report_attack(report);
             }
         }
+
+        let side = self.side_id.identify(&packet);
+        let diff = match side {
+            Side::Client => self.client_next_seq - Sequence::from(packet.tcp.seq),
+            Side::Server => self.server_next_seq.expect("guaranteed by above statements") - Sequence::from(packet.tcp.seq),
+        };
+
+        if diff == 0 {
+            if !packet.tcp_payload.is_empty() {
+                match side {
+                    Side::Client => {
+                        self.server_stream_ring.push(packet.cloned());
+                        self.client_next_seq = Sequence::from(packet.tcp.seq) + packet.tcp_payload.len() as u32;
+                    }
+                    Side::Server => {
+                        self.client_stream_ring.push(packet.cloned());
+                        self.client_next_seq = Sequence::from(packet.tcp.seq) + packet.tcp_payload.len() as u32;
+                    }
+                }
+            }
+
+            if packet.tcp.flags.rst {
+                self.state = TcpState::Closed(ClosedBy::ClosedByRst, side, Sequence::from(packet.tcp.seq));
+                return
+            }
+            if packet.tcp.flags.fin {
+                self.state = TcpState::ConnectionClosing(TcpClosing {
+                    initiator: side,
+                    initiator_state: TcpInitiatingClosingState::FinWait1,
+                    effector_state:  TcpInitiatedClosingState::CloseWait,
+                });
+            }
+        } else if diff > 0 {
+            // future-out-of-order packet case
+            todo!("future-out-of-order packet case")
+        } else {
+            let first_packet_in_ring_came_later_than_current = |p: &PacketManifest| p.tcp.seq > packet.tcp.seq;
+            if side == Side::Server && self.client_stream_ring.first().map(first_packet_in_ring_came_later_than_current).unwrap_or(true) {
+                return
+            } else if side == Side::Client && self.server_stream_ring.first().map(first_packet_in_ring_came_later_than_current).unwrap_or(true) {
+                return
+            }
+
+            // past-out-of-order packet case
+            todo!("past-out-of-order packet case")
+        }
     }
 
     fn state_connection_closing(&mut self, packet: PacketManifest, state: TcpClosing) {}
@@ -183,7 +247,7 @@ impl Connection {
 mod tests {
     use super::*;
     use crate::event::test_utils::DummyAttackReporter;
-    use crate::types::{IpLayer, TcpLayer, TcpFlags};
+    use crate::types::{IpLayer, TcpLayer, TcpFlags, Payload};
 
     use std::rc::Rc;
     use std::cell::RefCell;
@@ -221,7 +285,7 @@ mod tests {
                 },
                 ..Default::default()
             },
-            tcp_payload: &[],
+            tcp_payload: Payload::from(&[][..]),
         };
         let mut connection = Connection::from_packet(packet, connection_options);
         assert_eq!(connection.state, TcpState::ConnectionRequest, "invalid state transaction");
@@ -240,7 +304,7 @@ mod tests {
                     ..Default::default()
                 },
             },
-            tcp_payload: &[],
+            tcp_payload: Payload::from(&[][..]),
         });
         assert_eq!(connection.state, TcpState::ConnectionEstablished, "invalid state transaction");
 
@@ -258,7 +322,7 @@ mod tests {
                     ..Default::default()
                 },
             },
-          tcp_payload: &[],
+          tcp_payload: Payload::from(&[][..]),
         });
 
         let reports_count = shared_reports.borrow().len();
@@ -278,7 +342,7 @@ mod tests {
                     ..Default::default()
                 },
             },
-            tcp_payload: &[],
+            tcp_payload: Payload::from(&[][..]),
         });
         assert_eq!(connection.state, TcpState::DataTransfer, "invalid state transition");
 
@@ -296,7 +360,7 @@ mod tests {
                     ..Default::default()
                 },
             },
-            tcp_payload: &[],
+            tcp_payload: Payload::from(&[][..]),
         });
         let reports_count = shared_reports.borrow().len();
         assert_eq!(reports_count, 2, "hijack detection fail");

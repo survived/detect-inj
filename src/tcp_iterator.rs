@@ -6,7 +6,7 @@ use pnet::datalink::{DataLinkReceiver, DataLinkSender, NetworkInterface, channel
 use pnet::datalink::Channel::Ethernet;
 use pdu;
 
-use crate::types::{PacketManifest, IpLayer, TcpLayer, TcpFlags};
+use crate::types::{PacketManifest, IpLayer, TcpLayer, TcpFlags, Payload};
 
 pub struct TcpIterator {
     send: Box<dyn DataLinkSender + 'static>,
@@ -82,7 +82,7 @@ impl TcpIterator {
     }
     fn parse_tcp(ip: IpLayer, buffer: &[u8]) -> Option<PacketManifest> {
         let tcp_pdu = pdu::TcpPdu::new(buffer).ok()?;
-        let tcp_payload = &buffer[tcp_pdu.computed_data_offset()..];
+        let tcp_payload = Payload::from(&buffer[tcp_pdu.computed_data_offset()..]);
         Some(PacketManifest {
             ip,
             tcp: TcpLayer {

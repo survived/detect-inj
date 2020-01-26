@@ -22,3 +22,9 @@ impl From<u32> for Sequence {
         Sequence(seq)
     }
 }
+
+impl Into<u32> for Sequence {
+    fn into(self) -> u32 {
+        self.0
+    }
+}
