@@ -1,43 +1,7 @@
 use std::cmp;
 use std::collections::BTreeMap;
 
-use crate::types::{Sequence, PacketManifest, Payload};
-
-/// Range of sequence number within package fits.
-///
-/// We assume that two SequenceRange are equal if them intersect. This helps us to
-/// detect overlaps.
-#[derive(Copy, Clone, Debug)]
-pub struct SequenceRange {
-    pub from: Sequence,
-    pub to: Sequence,
-}
-
-impl cmp::PartialEq for SequenceRange {
-    fn eq(&self, other: &SequenceRange) -> bool {
-        other.from <= self.to && self.from <= other.to
-    }
-}
-
-impl cmp::PartialOrd for SequenceRange {
-    fn partial_cmp(&self, other: &SequenceRange) -> Option<cmp::Ordering> {
-        Some(<Self as cmp::Ord>::cmp(self, other))
-    }
-}
-
-impl cmp::Eq for SequenceRange {}
-
-impl cmp::Ord for SequenceRange {
-    fn cmp(&self, other: &SequenceRange) -> cmp::Ordering {
-        if self.to < other.from {
-            cmp::Ordering::Less
-        } else if self.from > other.to {
-            cmp::Ordering::Greater
-        } else {
-            cmp::Ordering::Equal
-        }
-    }
-}
+use crate::types::{Sequence, SequenceRange, PacketManifest, Payload};
 
 /// Tracks out-of-order packages to coalesce them as soon as it will be possible.
 ///
@@ -59,9 +23,14 @@ impl OrderedCoalesce {
     /// Puts given package in OrderedCoalesce, gives back `OverlapBlock`s if there're any and
     /// their constructing is enabled.
     pub fn insert(&mut self, packet: PacketManifest<'static>) -> Option<Vec<OverlapBlock>> {
-        let mut range = SequenceRange {
+        if packet.tcp_payload.is_empty() {
+            // Ignore empty packets
+            return Some(vec![]).filter(|_| self.construct_overlap_blocks_enabled())
+        }
+
+        let range = SequenceRange {
             from: Sequence::from(packet.tcp.seq),
-            to: Sequence::from(packet.tcp.seq) + packet.tcp_payload.len() as u32,
+            to: Sequence::from(packet.tcp.seq) + (packet.tcp_payload.len() - 1) as u32,
         };
 
         let (not_overlapping, overlap_blocks) = self.overlap_check(range, &packet.tcp_payload);
@@ -85,26 +54,29 @@ impl OrderedCoalesce {
     fn overlap_check(&self, range: SequenceRange, payload: &Payload) -> (Vec<SequenceRange>, Option<Vec<OverlapBlock>>) {
         let mut not_overlapping = vec![range];
         let mut overlaping_blocks = vec![];
-        for (&overlapping_range, overlapping_package) in self.collection.range(range..=range) {
+        for (&overlapping_range, overlapping_package) in self.collection.range(range..) {
             // iterating here over all packages which
             // ranges intersect with being inserted
             // package range
-            debug_assert_eq!(overlapping_range, range, "ranges must overlap");
+            if overlapping_range != range {
+                break;
+            }
 
             if self.construct_overlap_blocks_enabled() {
                 let overlap = SequenceRange {
                     from: cmp::max(overlapping_range.from, range.from),
                     to:   cmp::min(overlapping_range.to, range.to),
                 };
-                let payload_range =  Into::<u32>::into(overlap.from) as usize..=Into::<u32>::into(overlap.to) as usize;
-                if payload[payload_range.clone()] != overlapping_package.tcp_payload[payload_range.clone()] {
+                let looser = payload.sub_payload(overlap, range.from);
+                let winner = overlapping_package.tcp_payload.sub_payload(overlap, Sequence::from(overlapping_package.tcp.seq));
+                // let winner = overlapping_package.tcp_payload.sub_payload(overlap, overlapping_range.from);
+                if winner != looser {
                     overlaping_blocks.push(OverlapBlock {
-                        winner: overlapping_package.tcp_payload[payload_range.clone()].to_vec().into_boxed_slice(),
-                        loser:  payload[payload_range.clone()].to_vec().into_boxed_slice(),
+                        winner: winner.to_vec().into_boxed_slice(),
+                        loser:  looser.to_vec().into_boxed_slice(),
                         range:  overlap,
                     });
                 }
-
             }
 
             let range = not_overlapping.pop().expect("guaranteed to have at least one element");
@@ -132,23 +104,119 @@ impl OrderedCoalesce {
     }
 
     /// Takes a packet and ordered nonoverlapping ranges within it, produces subpackets
-    /// corresponding to every range.
+    /// corresponding to every range. Ranges are inclusive.
     fn split_packet_into_sub_packets(packet: PacketManifest<'static>, ranges: &[SequenceRange]) -> Vec<(SequenceRange, PacketManifest<'static>)> {
-        let mut sub_packages = vec![];
-        let mut packet = Some(packet);
-        for &range in ranges {
-            let (_, sub_packet) = packet.take().expect("it might be None only within iteration")
-                .split_at(range.from);
-            let (corresponding_packet, rest_of_packet) = sub_packet.split_at(range.to);
-            sub_packages.push((range, corresponding_packet));
-            packet = Some(rest_of_packet)
-        }
-        sub_packages
+        ranges.into_iter().scan(packet, |packet, &range| {
+            let mut sub_packet = packet.split_off(range.from);
+            let everything_else = sub_packet.split_off(range.to + 1);
+            *packet = everything_else;
+            Some((range, sub_packet))
+        }).collect()
     }
 }
 
+#[derive(Eq, PartialEq, Debug)]
 pub struct OverlapBlock {
     pub winner: Box<[u8]>,
     pub loser:  Box<[u8]>,
     pub range:  SequenceRange,
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::{Ipv4Addr, IpAddr};
+
+    use super::*;
+    use crate::types::*;
+    use crate::types::packet::tests::tcp_packet;
+    use std::sync::atomic::Ordering::SeqCst;
+
+    #[test]
+    fn not_detect_overlapping_block_if_there_is_none() {
+        let mut detector = OrderedCoalesce::new();
+        assert_eq!(Some(vec![]), detector.insert(tcp_packet(0, &[1,2,3])));
+        assert_eq!(Some(vec![]), detector.insert(tcp_packet(6, &[7,8])));
+        assert_eq!(Some(vec![]), detector.insert(tcp_packet(3, &[4,5,6])));
+    }
+
+    #[test]
+    fn detect_coalesce_within_single_packet() {
+        let mut detector = OrderedCoalesce::new();
+        assert_eq!(Some(vec![]), detector.insert(tcp_packet(0, &[1,2,3,4,5,6])));
+        let overlaps = detector.insert(tcp_packet(1, &[10,11,12]));
+        let overlap_expected = OverlapBlock {
+            winner: vec![2,3,4].into_boxed_slice(),
+            loser:  vec![10,11,12].into_boxed_slice(),
+            range: SequenceRange {
+                from: Sequence::from(1),
+                to:   Sequence::from(3),
+            }
+        };
+        assert_eq!(overlaps, Some(vec![overlap_expected]));
+    }
+
+    #[test]
+    fn not_detect_overlap_if_competitors_are_equal() {
+        let mut detector = OrderedCoalesce::new();
+        assert_eq!(Some(vec![]), detector.insert(tcp_packet(0, &[1,2,3])));
+        assert_eq!(Some(vec![]), detector.insert(tcp_packet(6, &[7,8])));
+        assert_eq!(Some(vec![]), detector.insert(tcp_packet(3, &[4,5,6])));
+
+        assert_eq!(Some(vec![]), detector.insert(tcp_packet(2, &[3,4,5,6,7])));
+    }
+
+    #[test]
+    fn detect_overlap_within_several_packets() {
+        let mut detector = OrderedCoalesce::new();
+        assert_eq!(Some(vec![]), detector.insert(tcp_packet(0, &[1,2,3])));
+        assert_eq!(Some(vec![]), detector.insert(tcp_packet(3, &[4,5,6])));
+
+        let overlap = detector.insert(tcp_packet(2, &[10,11]));
+        let expected_overlap1 = OverlapBlock {
+            winner: vec![3].into_boxed_slice(),
+            loser: vec![10].into_boxed_slice(),
+            range: SequenceRange {
+                from: Sequence::from(2),
+                to: Sequence::from(2),
+            },
+        };
+        let expected_overlap2 = OverlapBlock {
+            winner: vec![4].into_boxed_slice(),
+            loser: vec![11].into_boxed_slice(),
+            range: SequenceRange {
+                from: Sequence::from(3),
+                to: Sequence::from(3),
+            },
+        };
+        assert_eq!(overlap, Some(vec![expected_overlap1, expected_overlap2]))
+    }
+
+    #[test]
+    fn split_packet_into_sub_packets() {
+        let payload = (0..10).collect::<Vec<_>>();
+        let original_packet = tcp_packet(0, &payload);
+        let ranges = &[
+            SequenceRange {
+                from: Sequence::from(0),
+                to: Sequence::from(0),
+            },
+            SequenceRange {
+                from: Sequence::from(3),
+                to: Sequence::from(6),
+            },
+            SequenceRange {
+                from: Sequence::from(8),
+                to: Sequence::from(9),
+            },
+        ];
+
+        let actual = OrderedCoalesce::split_packet_into_sub_packets(original_packet, ranges);
+        let expected = vec![
+            (ranges[0], tcp_packet(0, &payload[0..=0])),
+            (ranges[1], tcp_packet(3, &payload[3..=6])),
+            (ranges[2], tcp_packet(8, &payload[8..=9])),
+        ];
+
+        assert_eq!(actual, expected);
+    }
 }
